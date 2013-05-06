@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -212,7 +211,7 @@ func (c *Client) init(user, passwd string) error {
 	c.jid = iq.Bind.Jid // our local id
 
 	// We're connected and can now receive and send messages.
-	fmt.Fprintf(c.tls, "<presence xml:lang='en'><show>xa</show><status>I for one welcome our new codebot overlords.</status></presence>")
+	fmt.Fprintf(c.tls, "<presence><status>Hi, My name is Pi.</status></presence>")
 	return nil
 }
 
@@ -247,10 +246,19 @@ func (c *Client) Recv() (event interface{}, err error) {
 }
 
 // Send sends message text.
-func (c *Client) Send(chat Chat) {
-	fmt.Fprintf(c.tls, "<message to='%s' type='%s' xml:lang='en'>"+
-		"<body>%s</body></message>",
-		xmlEscape(chat.Remote), xmlEscape(chat.Type), xmlEscape(chat.Text))
+func (c *Client) Send(msg interface{}) {
+	switch v := msg.(type) {
+	case *Chat:
+		fmt.Fprintf(c.tls, "<message to='%s' type='%s' xml:lang='en'>"+
+			"<body>%s</body></message>",
+			xmlEscape(v.Remote), xmlEscape(v.Type), xmlEscape(v.Text))
+	case Chat:
+		fmt.Fprintf(c.tls, "<message to='%s' type='%s' xml:lang='en'>"+
+			"<body>%s</body></message>",
+			xmlEscape(v.Remote), xmlEscape(v.Type), xmlEscape(v.Text))
+	case string:
+		fmt.Fprintf(c.tls, "<presence><status>"+v+"</status></presence>")
+	}
 }
 
 // RFC 3920  C.1  Streams name space
@@ -378,7 +386,7 @@ func nextStart(p *xml.Decoder) (xml.StartElement, error) {
 	for {
 		t, err := p.Token()
 		if err != nil {
-			log.Fatal("token", err)
+			return xml.StartElement{}, err
 		}
 		switch t := t.(type) {
 		case xml.StartElement:
