@@ -1,15 +1,16 @@
 package xmpp
 
 import (
-	"fmt"
+	//"fmt"
 	"testing"
 )
 
 var server = "talk.google.com:443"
-var username = "NoahPi87@gmail.com"
-var password = "15935787"
+var username = "XXX@gmail.com"
+var password = "XXXX"
 
 func TestSendMessage(t *testing.T) {
+	Debug = true
 	xmppClient := NewXmppClient()
 	err := xmppClient.Connect(server, username, password)
 	if err != nil {
@@ -18,11 +19,10 @@ func TestSendMessage(t *testing.T) {
 
 	chathandler := NewChatHandler()
 	xmppClient.AddHandler(chathandler)
-	for msg := range chathandler.GetHandleCh() {
-		fmt.Println("chat message:", msg)
-		chatMessage := msg.(Chat)
-		replyChat := &Chat{chatMessage.Remote, chatMessage.Type, "echo:" + chatMessage.Text}
-		xmppClient.Send(replyChat)
+	for event := range chathandler.GetHandleCh() {
+		msg := event.Stanza.(*Message)
+		xmppClient.SendChatMessage(msg.From, "echo "+msg.Body)
+		xmppClient.SendPresenceStatus("echo " + msg.Body)
 	}
 
 }

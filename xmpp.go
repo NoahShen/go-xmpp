@@ -28,6 +28,8 @@ import (
 	"strings"
 )
 
+var Debug = false
+
 const (
 	nsStream = "http://etherx.jabber.org/streams"
 	nsTLS    = "urn:ietf:params:xml:ns:xmpp-tls"
@@ -201,7 +203,7 @@ func (c *Client) init(user, passwd string) error {
 
 	// Send IQ message asking to bind to the local user name.
 	fmt.Fprintf(c.tls, "<iq type='set' id='x'><bind xmlns='%s'/></iq>\n", nsBind)
-	var iq clientIQ
+	var iq IQ
 	if err = c.p.DecodeElement(&iq, nil); err != nil {
 		return errors.New("unmarshal <iq>: " + err.Error())
 	}
@@ -211,54 +213,41 @@ func (c *Client) init(user, passwd string) error {
 	c.jid = iq.Bind.Jid // our local id
 
 	// We're connected and can now receive and send messages.
-	fmt.Fprintf(c.tls, "<presence><status>Hi, My name is Pi.</status></presence>")
+	fmt.Fprintf(c.tls, "<presence></presence>")
 	return nil
 }
 
-type Chat struct {
-	Remote string
-	Type   string
-	Text   string
-}
-
-type Presence struct {
-	From string
-	To   string
-	Type string
-	Show string
-}
-
 // Recv wait next token of chat.
-func (c *Client) Recv() (event interface{}, err error) {
+func (c *Client) Recv() (stanza interface{}, err error) {
 	for {
-		_, val, err := next(c.p)
+		_, stanza, err := next(c.p)
 		if err != nil {
-			return Chat{}, err
+			return nil, err
 		}
-		switch v := val.(type) {
-		case *clientMessage:
-			return Chat{v.From, v.Type, v.Body}, nil
-		case *clientPresence:
-			return Presence{v.From, v.To, v.Type, v.Show}, nil
+		if Debug {
+			bytes, err := xml.Marshal(stanza)
+			if err != nil {
+				fmt.Println("receive marshal error:", err)
+			} else {
+				fmt.Println("receive stanza:", string(bytes))
+			}
 		}
+		return stanza, nil
 	}
 	panic("unreachable")
 }
 
 // Send sends message text.
-func (c *Client) Send(msg interface{}) {
-	switch v := msg.(type) {
-	case *Chat:
-		fmt.Fprintf(c.tls, "<message to='%s' type='%s' xml:lang='en'>"+
-			"<body>%s</body></message>",
-			xmlEscape(v.Remote), xmlEscape(v.Type), xmlEscape(v.Text))
-	case Chat:
-		fmt.Fprintf(c.tls, "<message to='%s' type='%s' xml:lang='en'>"+
-			"<body>%s</body></message>",
-			xmlEscape(v.Remote), xmlEscape(v.Type), xmlEscape(v.Text))
-	case string:
-		fmt.Fprintf(c.tls, "<presence><status>"+v+"</status></presence>")
+func (c *Client) Send(stanza interface{}) error {
+	bytes, err := xml.Marshal(stanza)
+	if err != nil {
+		return err
 	}
+	if Debug {
+		fmt.Println("send stanza:", string(bytes))
+	}
+	_, sendErr := c.tls.Write(bytes)
+	return sendErr
 }
 
 // RFC 3920  C.1  Streams name space
@@ -330,18 +319,18 @@ type bindBind struct {
 
 // RFC 3921  B.1  jabber:client
 
-type clientMessage struct {
+type Message struct {
 	XMLName xml.Name `xml:"jabber:client message"`
-	From    string   `xml:"from,attr"`
-	Id      string   `xml:"id,attr"`
-	To      string   `xml:"to,attr"`
-	Type    string   `xml:"type,attr"` // chat, error, groupchat, headline, or normal
+	From    string   `xml:"from,attr,omitempty"`
+	Id      string   `xml:"id,attr,omitempty"`
+	To      string   `xml:"to,attr,omitempty"`
+	Type    string   `xml:"type,attr,omitempty"` // chat, error, groupchat, headline, or normal
 
 	// These should technically be []clientText,
 	// but string is much more convenient.
-	Subject string `xml:"subject"`
-	Body    string `xml:"body"`
-	Thread  string `xml:"thread"`
+	Subject string `xml:"subject,omitempty"`
+	Body    string `xml:"body,omitempty"`
+	Thread  string `xml:"thread,omitempty"`
 }
 
 type clientText struct {
@@ -349,31 +338,31 @@ type clientText struct {
 	Body string `xml:"chardata"`
 }
 
-type clientPresence struct {
+type Presence struct {
 	XMLName xml.Name `xml:"jabber:client presence"`
-	From    string   `xml:"from,attr"`
-	Id      string   `xml:"id,attr"`
-	To      string   `xml:"to,attr"`
-	Type    string   `xml:"type,attr"` // error, probe, subscribe, subscribed, unavailable, unsubscribe, unsubscribed
-	Lang    string   `xml:"lang,attr"`
+	From    string   `xml:"from,attr,omitempty"`
+	Id      string   `xml:"id,attr,omitempty"`
+	To      string   `xml:"to,attr,omitempty"`
+	Type    string   `xml:"type,attr,omitempty"` // error, probe, subscribe, subscribed, unavailable, unsubscribe, unsubscribed
+	Lang    string   `xml:"lang,attr,omitempty"`
 
-	Show     string `xml:"show"`        // away, chat, dnd, xa
-	Status   string `xml:"status,attr"` // sb []clientText
-	Priority string `xml:"priority,attr"`
-	Error    *clientError
+	Show     string `xml:"show,omitempty"`   // away, chat, dnd, xa
+	Status   string `xml:"status,omitempty"` // sb []clientText
+	Priority string `xml:"priority,omitempty"`
+	Error    *Error
 }
 
-type clientIQ struct { // info/query
+type IQ struct { // info/query
 	XMLName xml.Name `xml:"jabber:client iq"`
 	From    string   `xml:",attr"`
 	Id      string   `xml:",attr"`
 	To      string   `xml:",attr"`
 	Type    string   `xml:",attr"` // error, get, result, set
-	Error   clientError
+	Error   *Error
 	Bind    bindBind
 }
 
-type clientError struct {
+type Error struct {
 	XMLName xml.Name `xml:"jabber:client error"`
 	Code    string   `xml:",attr"`
 	Type    string   `xml:",attr"`
@@ -434,13 +423,13 @@ func next(p *xml.Decoder) (xml.Name, interface{}, error) {
 	case nsBind + " bind":
 		nv = &bindBind{}
 	case nsClient + " message":
-		nv = &clientMessage{}
+		nv = &Message{}
 	case nsClient + " presence":
-		nv = &clientPresence{}
+		nv = &Presence{}
 	case nsClient + " iq":
-		nv = &clientIQ{}
+		nv = &IQ{}
 	case nsClient + " error":
-		nv = &clientError{}
+		nv = &Error{}
 	default:
 		return xml.Name{}, nil, errors.New("unexpected XMPP message " +
 			se.Name.Space + " <" + se.Name.Local + "/>")

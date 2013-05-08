@@ -3,27 +3,32 @@ package xmpp
 import ()
 
 type Handler interface {
-	GetHandleCh() chan interface{}
-	Filter(interface{}) bool
+	GetHandleCh() chan *Event
+	Filter(*Event) bool
 	IsOnce() bool
 }
 
 type ChatHandler struct {
-	handlCh chan interface{}
+	handlCh chan *Event
 }
 
 func NewChatHandler() Handler {
-	return &ChatHandler{make(chan interface{})}
+	return &ChatHandler{make(chan *Event)}
 }
 
-func (self *ChatHandler) GetHandleCh() chan interface{} {
+func (self *ChatHandler) GetHandleCh() chan *Event {
 	return self.handlCh
 }
 
-func (self *ChatHandler) Filter(msg interface{}) bool {
-	switch chat := msg.(type) {
-	case Chat:
-		return chat.Text != ""
+func (self *ChatHandler) Filter(event *Event) bool {
+	if event.Type == Stanza {
+		stanza := event.Stanza
+		if stanza != nil {
+			switch stanza := stanza.(type) {
+			case *Message:
+				return stanza.Type == "chat" && len(stanza.Body) > 0
+			}
+		}
 	}
 	return false
 }

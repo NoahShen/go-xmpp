@@ -4,6 +4,20 @@ import (
 	"sync"
 )
 
+type EventType int
+
+const (
+	Connection = EventType(0)
+	Stanza     = EventType(1)
+)
+
+type Event struct {
+	Type    EventType
+	Stanza  interface{}
+	Error   error
+	Message string
+}
+
 type XmppClient struct {
 	client     *Client
 	sendQueue  chan interface{}
@@ -39,11 +53,29 @@ func (self *XmppClient) Send(msg interface{}) {
 	self.sendQueue <- msg
 }
 
+func (self *XmppClient) SendChatMessage(jid, content string) {
+	msg := &Message{}
+	msg.To = jid
+	msg.Type = "chat"
+	msg.Body = content
+	self.sendQueue <- msg
+}
+
+func (self *XmppClient) SendPresenceStatus(status string) {
+	presence := &Presence{}
+	presence.Status = status
+	self.sendQueue <- presence
+}
+
 func (self *XmppClient) startSendMessage() {
 	for {
 		select {
 		case msg := <-self.sendQueue:
-			self.client.Send(msg)
+			err := self.client.Send(msg)
+			if err != nil {
+				self.fireHandler(&Event{Connection, nil, err, "send stanza error"})
+				break
+			}
 		case <-self.stopSendCh:
 			close(self.sendQueue)
 			break
@@ -53,12 +85,12 @@ func (self *XmppClient) startSendMessage() {
 
 func (self *XmppClient) startReadMessage() {
 	for {
-		msg, err := self.client.Recv()
+		stanza, err := self.client.Recv()
 		if err != nil {
-			self.fireHandler(msg)
+			self.fireHandler(&Event{Connection, nil, err, "receive stanza error"})
 			break
 		}
-		self.fireHandler(msg)
+		self.fireHandler(&Event{Stanza, stanza, nil, ""})
 	}
 }
 
@@ -85,11 +117,11 @@ func (self *XmppClient) RemoveHandlerByIndex(i int) {
 	self.handlers = append(self.handlers[0:i], self.handlers[i+1:]...)
 }
 
-func (self *XmppClient) fireHandler(msg interface{}) {
+func (self *XmppClient) fireHandler(event *Event) {
 	for i := len(self.handlers) - 1; i >= 0; i-- {
 		h := self.handlers[i]
-		if h.Filter(msg) {
-			h.GetHandleCh() <- msg
+		if h.Filter(event) {
+			h.GetHandleCh() <- event
 			if h.IsOnce() {
 				self.RemoveHandlerByIndex(i)
 			}
