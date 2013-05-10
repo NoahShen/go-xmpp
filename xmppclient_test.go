@@ -6,8 +6,8 @@ import (
 )
 
 var server = "talk.google.com:443"
-var username = "XXX@gmail.com"
-var password = "XXXX"
+var username = "username@gmail.com"
+var password = "password"
 
 func TestSendMessage(t *testing.T) {
 	Debug = true

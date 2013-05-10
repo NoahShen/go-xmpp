@@ -118,6 +118,8 @@ func (self *XmppClient) RemoveHandlerByIndex(i int) {
 }
 
 func (self *XmppClient) fireHandler(event *Event) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
 	for i := len(self.handlers) - 1; i >= 0; i-- {
 		h := self.handlers[i]
 		if h.Filter(event) {
