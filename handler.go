@@ -5,7 +5,7 @@ import (
 )
 
 type Handler interface {
-	GetHandleCh() chan *Event
+	GetEventCh() chan *Event
 	// if time < 0, no timeout limit
 	GetEvent(time.Duration) *Event
 	Filter(*Event) bool
@@ -13,20 +13,20 @@ type Handler interface {
 }
 
 type DefaultHandler struct {
-	handlCh chan *Event
+	EventCh chan *Event
 }
 
-func (self *DefaultHandler) GetHandleCh() chan *Event {
-	return self.handlCh
+func (self *DefaultHandler) GetEventCh() chan *Event {
+	return self.EventCh
 }
 
 func (self *DefaultHandler) GetEvent(d time.Duration) *Event {
 	if d < 0 {
-		event := <-self.handlCh
+		event := <-self.EventCh
 		return event
 	} else {
 		select {
-		case event := <-self.handlCh:
+		case event := <-self.EventCh:
 			return event
 		case <-time.After(d):
 		}
@@ -41,7 +41,7 @@ type ChatHandler struct {
 
 func NewChatHandler() Handler {
 	c := &ChatHandler{}
-	c.handlCh = make(chan *Event)
+	c.EventCh = make(chan *Event)
 	return c
 }
 
@@ -69,7 +69,7 @@ type IqIDHandler struct {
 
 func NewIqIDHandler(iqId string) Handler {
 	iqH := &IqIDHandler{}
-	iqH.handlCh = make(chan *Event)
+	iqH.EventCh = make(chan *Event)
 	iqH.iqId = iqId
 	return iqH
 }

@@ -198,7 +198,7 @@ func (self *XmppClient) fireHandler(event *Event) {
 	for i := len(copyHandlers) - 1; i >= 0; i-- {
 		h := copyHandlers[i]
 		if h.Filter(event) {
-			h.GetHandleCh() <- event
+			h.GetEventCh() <- event
 			if h.IsOneTime() {
 				self.RemoveHandlerByIndex(i)
 			}
