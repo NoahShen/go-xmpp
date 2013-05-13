@@ -90,3 +90,25 @@ func (self *IqIDHandler) Filter(event *Event) bool {
 func (self *IqIDHandler) IsOneTime() bool {
 	return true
 }
+
+//Connection Error handler
+type ConnErrorHandler struct {
+	DefaultHandler
+}
+
+func NewConnErrorHandler() Handler {
+	ch := &ConnErrorHandler{}
+	ch.EventCh = make(chan *Event)
+	return ch
+}
+
+func (self *ConnErrorHandler) Filter(event *Event) bool {
+	if event.Type == Connection {
+		return event.Error != nil
+	}
+	return false
+}
+
+func (self *ConnErrorHandler) IsOneTime() bool {
+	return false
+}

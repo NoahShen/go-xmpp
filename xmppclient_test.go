@@ -11,7 +11,7 @@ var password = "password"
 
 func TestSendMessage(t *testing.T) {
 	Debug = true
-	xmppClient := NewXmppClient(ClientConfig{true, 10 * time.Second})
+	xmppClient := NewXmppClient(ClientConfig{true, 3, 3 * time.Second, false, 1})
 	err := xmppClient.Connect(server, username, password)
 	if err != nil {
 		t.Fatal(err)
