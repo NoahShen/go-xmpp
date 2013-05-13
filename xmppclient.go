@@ -1,7 +1,9 @@
 package xmpp
 
 import (
+	"errors"
 	"sync"
+	"time"
 )
 
 type EventType int
@@ -20,8 +22,13 @@ type Event struct {
 
 type XmppClient struct {
 	client     *Client
+	host       string
+	jid        string
+	password   string
+	domain     string
 	sendQueue  chan interface{}
 	stopSendCh chan int
+	stopPingCh chan int
 	mutex      sync.Mutex
 	handlers   []Handler
 }
@@ -30,22 +37,30 @@ func NewXmppClient() *XmppClient {
 	xmppClient := new(XmppClient)
 	xmppClient.sendQueue = make(chan interface{}, 10)
 	xmppClient.stopSendCh = make(chan int)
+	xmppClient.stopPingCh = make(chan int)
 	return xmppClient
 }
 
-func (self *XmppClient) Connect(host, username, password string) error {
-	client, err := NewClient(host, username, password)
+func (self *XmppClient) Connect(host, jid, password string) error {
+	client, err := NewClient(host, jid, password)
 	if err != nil {
 		return err
 	}
 	self.client = client
+	self.host = host
+	self.jid = jid
+	self.password = password
+	self.domain, _ = GetDomain(jid)
+
 	go self.startSendMessage()
 	go self.startReadMessage()
+	go self.startPing()
 	return nil
 }
 
 func (self *XmppClient) Disconnect() error {
 	self.stopSendCh <- 1
+	self.stopPingCh <- 1
 	return self.client.Close()
 }
 
@@ -68,16 +83,19 @@ func (self *XmppClient) SendPresenceStatus(status string) {
 }
 
 func (self *XmppClient) startSendMessage() {
-	for {
+	stopSend := false
+	for !stopSend {
 		select {
 		case msg := <-self.sendQueue:
 			err := self.client.Send(msg)
 			if err != nil {
 				self.fireHandler(&Event{Connection, nil, err, "send stanza error"})
+				stopSend = true
 				break
 			}
 		case <-self.stopSendCh:
 			close(self.sendQueue)
+			stopSend = true
 			break
 		}
 	}
@@ -92,6 +110,52 @@ func (self *XmppClient) startReadMessage() {
 		}
 		self.fireHandler(&Event{Stanza, stanza, nil, ""})
 	}
+}
+
+func (self *XmppClient) startPing() {
+	errCount := 0
+	stopPing := false
+	for !stopPing {
+		select {
+		case <-time.After(10 * time.Second):
+			err := self.doPing()
+			if err != nil {
+				errCount++
+				if errCount > 5 {
+					self.fireHandler(&Event{Connection, nil, err, "Ping timeout!"})
+					stopPing = true
+					break
+				}
+			} else {
+				if errCount > 0 {
+					errCount = 0
+				}
+			}
+		case <-self.stopPingCh:
+			stopPing = true
+			break
+		}
+	}
+}
+
+func (self *XmppClient) doPing() error {
+	iqId := RandomString(10)
+	pingHandler := NewIqIDHandler(iqId)
+	self.AddHandler(pingHandler)
+	ping := &IQ{
+		Id:   iqId,
+		To:   self.domain,
+		Type: "get",
+		Ping: &Ping{},
+	}
+	self.Send(ping)
+
+	// whatever result or unsupporting ping error
+	event := pingHandler.GetEvent(20 * time.Second)
+	if event == nil {
+		return errors.New("Ping timeout!")
+	}
+	return nil
 }
 
 func (self *XmppClient) AddHandler(handler Handler) {
@@ -118,13 +182,13 @@ func (self *XmppClient) RemoveHandlerByIndex(i int) {
 }
 
 func (self *XmppClient) fireHandler(event *Event) {
-	self.mutex.Lock()
-	defer self.mutex.Unlock()
-	for i := len(self.handlers) - 1; i >= 0; i-- {
-		h := self.handlers[i]
+	copyHandlers := make([]Handler, len(self.handlers))
+	copy(copyHandlers, self.handlers)
+	for i := len(copyHandlers) - 1; i >= 0; i-- {
+		h := copyHandlers[i]
 		if h.Filter(event) {
 			h.GetHandleCh() <- event
-			if h.IsOnce() {
+			if h.IsOneTime() {
 				self.RemoveHandlerByIndex(i)
 			}
 		}

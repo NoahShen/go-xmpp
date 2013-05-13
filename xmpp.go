@@ -354,12 +354,17 @@ type Presence struct {
 
 type IQ struct { // info/query
 	XMLName xml.Name `xml:"jabber:client iq"`
-	From    string   `xml:",attr"`
-	Id      string   `xml:",attr"`
-	To      string   `xml:",attr"`
-	Type    string   `xml:",attr"` // error, get, result, set
+	From    string   `xml:"from,attr,omitempty"`
+	Id      string   `xml:"id,attr,omitempty"`
+	To      string   `xml:"to,attr,omitempty"`
+	Type    string   `xml:"type,attr,omitempty"` // error, get, result, set
 	Error   *Error
-	Bind    bindBind
+	Bind    *bindBind
+	Ping    *Ping
+}
+
+type Ping struct {
+	XMLName xml.Name `xml:"urn:xmpp:ping ping"`
 }
 
 type Error struct {

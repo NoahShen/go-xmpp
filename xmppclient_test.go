@@ -19,7 +19,8 @@ func TestSendMessage(t *testing.T) {
 
 	chathandler := NewChatHandler()
 	xmppClient.AddHandler(chathandler)
-	for event := range chathandler.GetHandleCh() {
+	for {
+		event := chathandler.GetEvent(-1)
 		msg := event.Stanza.(*Message)
 		xmppClient.SendChatMessage(msg.From, "echo "+msg.Body)
 		xmppClient.SendPresenceStatus("echo " + msg.Body)
