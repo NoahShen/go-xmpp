@@ -2,6 +2,7 @@ package xmpp
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -21,8 +22,11 @@ type Event struct {
 }
 
 type ClientConfig struct {
-	PingEnable   bool
-	PingInterval time.Duration
+	PingEnable      bool
+	PingErrorTimes  int
+	PingInterval    time.Duration
+	ReconnectEnable bool
+	ReconnectTimes  int
 }
 
 type XmppClient struct {
@@ -59,6 +63,9 @@ func (self *XmppClient) Connect(host, jid, password string) error {
 	self.password = password
 	self.domain, _ = GetDomain(jid)
 
+	if reconnectTimes > 0 {
+		reconnectTimes = 0
+	}
 	go self.startSendMessage()
 	go self.startReadMessage()
 	if self.config.PingEnable {
@@ -132,7 +139,7 @@ func (self *XmppClient) startPing() {
 			err := self.doPing()
 			if err != nil {
 				errCount++
-				if errCount > 5 {
+				if errCount > self.config.PingErrorTimes {
 					self.fireHandler(&Event{Connection, nil, err, "Ping timeout!"})
 					stopPing = true
 					break
@@ -162,7 +169,7 @@ func (self *XmppClient) doPing() error {
 	self.Send(ping)
 
 	// whatever result or unsupporting ping error
-	event := pingHandler.GetEvent(20 * time.Second)
+	event := pingHandler.GetEvent(5 * time.Second)
 	if event == nil {
 		return errors.New("Ping timeout!")
 	}
@@ -193,15 +200,39 @@ func (self *XmppClient) RemoveHandlerByIndex(i int) {
 }
 
 func (self *XmppClient) fireHandler(event *Event) {
+	e := event
+	if event.Type == Connection && event.Error != nil {
+		if err := self.handleConnError(event); err != nil {
+			e = &Event{Connection, nil, err, "All reconnecting error!"}
+		}
+	}
 	copyHandlers := make([]Handler, len(self.handlers))
 	copy(copyHandlers, self.handlers)
 	for i := len(copyHandlers) - 1; i >= 0; i-- {
 		h := copyHandlers[i]
-		if h.Filter(event) {
-			h.GetEventCh() <- event
+		if h.Filter(e) {
+			h.GetEventCh() <- e
 			if h.IsOneTime() {
 				self.RemoveHandlerByIndex(i)
 			}
 		}
 	}
+}
+
+var reconnectTimes = 0
+
+func (self *XmppClient) handleConnError(event *Event) error {
+	if self.config.ReconnectEnable {
+		reconnectTimes++
+		if reconnectTimes > self.config.ReconnectTimes {
+			msg := fmt.Sprintf("Connect failed after retring %d times", self.config.ReconnectTimes)
+			return errors.New(msg)
+		}
+		self.Disconnect()
+		if connErr := self.Connect(self.host, self.jid, self.password); connErr != nil {
+			e := &Event{Connection, nil, connErr, "Reconnecting error!"}
+			self.handleConnError(e)
+		}
+	}
+	return nil
 }
