@@ -20,8 +20,14 @@ type Event struct {
 	Message string
 }
 
+type ClientConfig struct {
+	PingEnable   bool
+	PingInterval time.Duration
+}
+
 type XmppClient struct {
 	client     *Client
+	config     ClientConfig
 	host       string
 	jid        string
 	password   string
@@ -33,8 +39,9 @@ type XmppClient struct {
 	handlers   []Handler
 }
 
-func NewXmppClient() *XmppClient {
+func NewXmppClient(conf ClientConfig) *XmppClient {
 	xmppClient := new(XmppClient)
+	xmppClient.config = conf
 	xmppClient.sendQueue = make(chan interface{}, 10)
 	xmppClient.stopSendCh = make(chan int)
 	xmppClient.stopPingCh = make(chan int)
@@ -54,13 +61,17 @@ func (self *XmppClient) Connect(host, jid, password string) error {
 
 	go self.startSendMessage()
 	go self.startReadMessage()
-	go self.startPing()
+	if self.config.PingEnable {
+		go self.startPing()
+	}
 	return nil
 }
 
 func (self *XmppClient) Disconnect() error {
 	self.stopSendCh <- 1
-	self.stopPingCh <- 1
+	if self.config.PingEnable {
+		self.stopPingCh <- 1
+	}
 	return self.client.Close()
 }
 
@@ -117,7 +128,7 @@ func (self *XmppClient) startPing() {
 	stopPing := false
 	for !stopPing {
 		select {
-		case <-time.After(10 * time.Second):
+		case <-time.After(self.config.PingInterval):
 			err := self.doPing()
 			if err != nil {
 				errCount++

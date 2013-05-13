@@ -1,8 +1,8 @@
 package xmpp
 
 import (
-	//"fmt"
 	"testing"
+	"time"
 )
 
 var server = "talk.google.com:443"
@@ -11,7 +11,7 @@ var password = "password"
 
 func TestSendMessage(t *testing.T) {
 	Debug = true
-	xmppClient := NewXmppClient()
+	xmppClient := NewXmppClient(ClientConfig{true, 10 * time.Second})
 	err := xmppClient.Connect(server, username, password)
 	if err != nil {
 		t.Fatal(err)
