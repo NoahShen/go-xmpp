@@ -117,7 +117,7 @@ func (self *XmppClient) startPing() {
 	stopPing := false
 	for !stopPing {
 		select {
-		case <-time.After(10 * time.Second):
+		case <-time.After(60 * time.Second):
 			err := self.doPing()
 			if err != nil {
 				errCount++
