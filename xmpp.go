@@ -212,8 +212,6 @@ func (c *Client) init(user, passwd string) error {
 	}
 	c.jid = iq.Bind.Jid // our local id
 
-	// We're connected and can now receive and send messages.
-	fmt.Fprintf(c.tls, "<presence></presence>")
 	return nil
 }
 
