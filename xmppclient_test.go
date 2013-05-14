@@ -28,6 +28,7 @@ func TestSendMessage(t *testing.T) {
 	roster := xmppClient.RequestRoster()
 	fmt.Println("======= roster:", roster)
 
+	xmppClient.SendPresenceStatus("")
 	for {
 		select {
 		case event := <-chathandler.GetEventCh():
