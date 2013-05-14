@@ -37,6 +37,11 @@ func TestSendMessage(t *testing.T) {
 		case subEvent := <-subscribeHandler.GetEventCh():
 			subPresence := subEvent.Stanza.(*Presence)
 			fmt.Println("****" + subPresence.From + " request to add me as a contact")
+			subscribed := &Presence{
+				To:   subPresence.From,
+				Type: "subscribed",
+			}
+			xmppClient.Send(subscribed)
 		}
 	}
 
