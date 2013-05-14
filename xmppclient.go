@@ -100,6 +100,27 @@ func (self *XmppClient) SendPresenceStatus(status string) {
 	self.sendQueue <- presence
 }
 
+func (self *XmppClient) RequestRoster() *IQRoster {
+	iqId := RandomString(10)
+	rosterHandler := NewIqIDHandler(iqId)
+	self.AddHandler(rosterHandler)
+	iq := &IQ{
+		Type:   "get",
+		Id:     iqId,
+		Roster: &IQRoster{},
+	}
+
+	self.Send(iq)
+	event := rosterHandler.GetEvent(10 * time.Second)
+	if event != nil {
+		iqResp := event.Stanza.(*IQ)
+		if iqResp.Type == "result" {
+			return iqResp.Roster
+		}
+	}
+	return nil
+}
+
 func (self *XmppClient) startSendMessage() {
 	stopSend := false
 	for !stopSend {

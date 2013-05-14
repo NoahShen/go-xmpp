@@ -360,7 +360,22 @@ type IQ struct { // info/query
 	Type    string   `xml:"type,attr,omitempty"` // error, get, result, set
 	Error   *Error
 	Bind    *bindBind
+	Roster  *IQRoster
 	Ping    *Ping
+}
+
+type IQRoster struct {
+	XMLName xml.Name     `xml:"jabber:iq:roster query"`
+	Items   []RosterItem `xml:"item,omitempty"`
+}
+
+type RosterItem struct {
+	XMLName      xml.Name `xml:"item"`
+	Jid          string   `xml:"jid,attr,omitempty"`
+	Subscription string   `xml:"subscription,attr,omitempty"`
+	Name         string   `xml:"name,attr,omitempty"`
+	Ask          string   `xml:"ask,attr,omitempty"`
+	Groups       []string `xml:"groups,omitempty"`
 }
 
 type Ping struct {

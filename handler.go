@@ -61,6 +61,34 @@ func (self *ChatHandler) IsOneTime() bool {
 	return false
 }
 
+//Someone subscribe me
+type SubscribeHandler struct {
+	DefaultHandler
+}
+
+func NewSubscribeHandler() Handler {
+	h := &SubscribeHandler{}
+	h.EventCh = make(chan *Event)
+	return h
+}
+
+func (self *SubscribeHandler) Filter(event *Event) bool {
+	if event.Type == Stanza {
+		stanza := event.Stanza
+		if stanza != nil {
+			switch stanza := stanza.(type) {
+			case *Presence:
+				return stanza.Type == "subscribe"
+			}
+		}
+	}
+	return false
+}
+
+func (self *SubscribeHandler) IsOneTime() bool {
+	return false
+}
+
 //Ping handler
 type IqIDHandler struct {
 	iqId string
