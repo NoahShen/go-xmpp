@@ -37,8 +37,6 @@ type XmppClient struct {
 	password   string
 	domain     string
 	connected  bool
-	sendQueue  chan interface{}
-	stopSendCh chan int
 	stopPingCh chan int
 	mutex      sync.Mutex
 	handlers   []Handler
@@ -55,8 +53,7 @@ func (self *XmppClient) Connect(host, jid, password string) error {
 	if self.connected {
 		return errors.New("It's already connected!")
 	}
-	self.sendQueue = make(chan interface{}, 10)
-	self.stopSendCh = make(chan int, 1)
+
 	self.stopPingCh = make(chan int, 1)
 
 	client, err := NewClient(host, jid, password)
@@ -69,7 +66,6 @@ func (self *XmppClient) Connect(host, jid, password string) error {
 	self.password = password
 	self.domain, _ = GetDomain(jid)
 
-	go self.startSendMessage()
 	go self.startReadMessage()
 	if self.config.PingEnable {
 		go self.startPing()
@@ -84,15 +80,17 @@ func (self *XmppClient) Connect(host, jid, password string) error {
 
 func (self *XmppClient) Disconnect() error {
 	self.connected = false
-	self.stopSendCh <- 1
 	if self.config.PingEnable {
 		self.stopPingCh <- 1
 	}
 	return self.client.Close()
 }
 
-func (self *XmppClient) Send(msg interface{}) {
-	self.sendQueue <- msg
+func (self *XmppClient) Send(msg interface{}) error {
+	if !self.connected {
+		return errors.New("Connection is not connected now!")
+	}
+	return self.client.Send(msg)
 }
 
 func (self *XmppClient) SendChatMessage(jid, content string) {
@@ -100,16 +98,16 @@ func (self *XmppClient) SendChatMessage(jid, content string) {
 	msg.To = jid
 	msg.Type = "chat"
 	msg.Body = content
-	self.sendQueue <- msg
+	self.Send(msg)
 }
 
 func (self *XmppClient) SendPresenceStatus(status string) {
 	presence := &Presence{}
 	presence.Status = status
-	self.sendQueue <- presence
+	self.Send(presence)
 }
 
-func (self *XmppClient) RequestRoster() *IQRoster {
+func (self *XmppClient) RequestRoster() (*IQRoster, error) {
 	iqId := RandomString(10)
 	rosterHandler := NewIqIDHandler(iqId)
 	self.AddHandler(rosterHandler)
@@ -119,33 +117,18 @@ func (self *XmppClient) RequestRoster() *IQRoster {
 		Roster: &IQRoster{},
 	}
 
-	self.Send(iq)
+	sendErr := self.Send(iq)
+	if sendErr != nil {
+		return nil, sendErr
+	}
 	event := rosterHandler.GetEvent(10 * time.Second)
 	if event != nil {
 		iqResp := event.Stanza.(*IQ)
 		if iqResp.Type == "result" {
-			return iqResp.Roster
+			return iqResp.Roster, nil
 		}
 	}
-	return nil
-}
-
-func (self *XmppClient) startSendMessage() {
-	for self.connected {
-		select {
-		case msg := <-self.sendQueue:
-			err := self.client.Send(msg)
-			if err != nil {
-				if self.connected {
-					self.fireHandler(&Event{Connection, nil, err, "send stanza error"})
-				}
-				break
-			}
-		case <-self.stopSendCh:
-			close(self.sendQueue)
-			break
-		}
-	}
+	return nil, errors.New("No roster response from server!")
 }
 
 func (self *XmppClient) startReadMessage() {
@@ -261,31 +244,30 @@ func (self *XmppClient) handlePingError(err error) {
 	for reconnectTimes < self.config.ReconnectTimes {
 		reconnectTimes++
 		if Debug {
-			fmt.Printf("Reconnecting %d\n", reconnectTimes)
+			fmt.Printf("Reconnect after %d seconds\n", reconnectTimes*5)
 		}
+		// sleep more time when reconnectTimes increase
+		time.Sleep(time.Duration(reconnectTimes*5) * time.Second)
 		connErr := self.Connect(self.host, self.jid, self.password)
 		if connErr != nil {
 			if Debug {
-				fmt.Println("Reconnecting error:", connErr)
-				fmt.Printf("Next reconnecting after %d seconds\n", reconnectTimes*5)
+				fmt.Printf("Reconnecting error:%v\n", connErr)
 			}
-			// sleep more time when reconnectTimes increase
-			time.Sleep(time.Duration(reconnectTimes*5) * time.Second)
 			continue
 		}
-		if Debug {
-			fmt.Printf("Reconnecting success!")
-		}
 		reconnectedSuccess = true
+		if Debug {
+			fmt.Println("Reconnecting success!")
+		}
 		break
 	}
 	if !reconnectedSuccess {
 		msg := fmt.Sprintf("Ping timeout and reconnect failed after retring %d times", self.config.ReconnectTimes)
-		self.fireHandler(&Event{Connection, nil, err, msg})
+		self.fireHandler(&Event{Connection, nil, errors.New(msg), msg})
 		return
 	}
 
 	//make sure will receive roster and subscribe message
 	self.RequestRoster()
-	self.SendPresenceStatus("")
+	self.Send(&Presence{})
 }
