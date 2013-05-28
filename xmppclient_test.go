@@ -12,11 +12,14 @@ var password = "password"
 
 func TestSendMessage(t *testing.T) {
 	Debug = true
-	xmppClient := NewXmppClient(ClientConfig{false, 3, 60 * time.Second, false, 1})
+	xmppClient := NewXmppClient(ClientConfig{true, 1, 10 * time.Second, true, 5})
 	err := xmppClient.Connect(server, username, password)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	connErrorHandler := NewConnErrorHandler()
+	xmppClient.AddHandler(connErrorHandler)
 
 	chathandler := NewChatHandler()
 	xmppClient.AddHandler(chathandler)
@@ -25,12 +28,13 @@ func TestSendMessage(t *testing.T) {
 	xmppClient.AddHandler(subscribeHandler)
 
 	//make sure will receive roster and subscribe message
-	roster := xmppClient.RequestRoster()
-	fmt.Println("======= roster:", roster)
-
+	xmppClient.RequestRoster()
 	xmppClient.SendPresenceStatus("")
 	for {
 		select {
+		case event := <-connErrorHandler.GetEventCh():
+			fmt.Printf("Event catch: connection error: %v, msg: %s\n", event.Error, event.Message)
+			t.FailNow()
 		case event := <-chathandler.GetEventCh():
 			msg := event.Stanza.(*Message)
 			xmppClient.SendChatMessage(msg.From, "echo "+msg.Body)
