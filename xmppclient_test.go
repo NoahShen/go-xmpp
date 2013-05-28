@@ -29,7 +29,7 @@ func TestSendMessage(t *testing.T) {
 
 	//make sure will receive roster and subscribe message
 	xmppClient.RequestRoster()
-	xmppClient.SendPresenceStatus("")
+	xmppClient.Send(&Presence{})
 	for {
 		select {
 		case event := <-connErrorHandler.GetEventCh():
