@@ -76,7 +76,9 @@ func NewClient(host, user, passwd string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	if Debug {
+		fmt.Printf("===xmpp===Connected host:%s\n", addr)
+	}
 	if proxy != "" {
 		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\n", host)
 		fmt.Fprintf(c, "Host: %s\r\n", host)
@@ -96,6 +98,9 @@ func NewClient(host, user, passwd string) (*Client, error) {
 	tlsconn := tls.Client(c, &DefaultConfig)
 	if err = tlsconn.Handshake(); err != nil {
 		return nil, err
+	}
+	if Debug {
+		fmt.Println("===xmpp===TLS shake hand success.")
 	}
 
 	if strings.LastIndex(host, ":") > 0 {
@@ -131,16 +136,19 @@ func (c *Client) init(user, passwd string) error {
 	domain := a[1]
 
 	// Declare intent to be a jabber client.
-	fmt.Fprintf(c.tls, "<?xml version='1.0'?>\n"+
-		"<stream:stream to='%s' xmlns='%s'\n"+
-		" xmlns:stream='%s' version='1.0'>\n",
+	openStream := fmt.Sprintf("<?xml version='1.0'?><stream:stream to='%s' xmlns='%s' xmlns:stream='%s' version='1.0'>",
 		xmlEscape(domain), nsClient, nsStream)
+	if Debug {
+		fmt.Printf("===xmpp===send:\n%s\n", openStream)
+	}
+	fmt.Fprint(c.tls, openStream)
 
 	// Server should respond with a stream opening.
 	se, err := nextStart(c.p)
 	if err != nil {
 		return err
 	}
+
 	if se.Name.Space != nsStream || se.Name.Local != "stream" {
 		return errors.New("xmpp: expected <stream> but got <" + se.Name.Local + "> in " + se.Name.Space)
 	}
@@ -151,6 +159,12 @@ func (c *Client) init(user, passwd string) error {
 	var f streamFeatures
 	if err = c.p.DecodeElement(&f, nil); err != nil {
 		return errors.New("unmarshal <features>: " + err.Error())
+	}
+	if Debug {
+		bytes, err := xml.MarshalIndent(f, "", "    ")
+		if err == nil {
+			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
+		}
 	}
 	havePlain := false
 	for _, m := range f.Mechanisms.Mechanism {
@@ -167,11 +181,21 @@ func (c *Client) init(user, passwd string) error {
 	raw := "\x00" + user + "\x00" + passwd
 	enc := make([]byte, base64.StdEncoding.EncodedLen(len(raw)))
 	base64.StdEncoding.Encode(enc, []byte(raw))
-	fmt.Fprintf(c.tls, "<auth xmlns='%s' mechanism='PLAIN'>%s</auth>\n",
-		nsSASL, enc)
+
+	authXml := fmt.Sprintf("<auth xmlns='%s' mechanism='PLAIN'>%s</auth>", nsSASL, enc)
+	if Debug {
+		fmt.Printf("===xmpp===send:\n%s\n", authXml)
+	}
+	fmt.Fprintf(c.tls, authXml)
 
 	// Next message should be either success or failure.
 	name, val, err := next(c.p)
+	if Debug {
+		bytes, err := xml.MarshalIndent(val, "", "    ")
+		if err == nil {
+			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
+		}
+	}
 	switch v := val.(type) {
 	case *saslSuccess:
 	case *saslFailure:
@@ -184,9 +208,12 @@ func (c *Client) init(user, passwd string) error {
 
 	// Now that we're authenticated, we're supposed to start the stream over again.
 	// Declare intent to be a jabber client.
-	fmt.Fprintf(c.tls, "<stream:stream to='%s' xmlns='%s'\n"+
-		" xmlns:stream='%s' version='1.0'>\n",
+	openStream2 := fmt.Sprintf("<stream:stream to='%s' xmlns='%s' xmlns:stream='%s' version='1.0'>",
 		xmlEscape(domain), nsClient, nsStream)
+	if Debug {
+		fmt.Printf("===xmpp===send:\n%s\n", openStream2)
+	}
+	fmt.Fprint(c.tls, openStream2)
 
 	// Here comes another <stream> and <features>.
 	se, err = nextStart(c.p)
@@ -201,11 +228,28 @@ func (c *Client) init(user, passwd string) error {
 		//return os.NewError("unmarshal <features>: " + err.String())
 	}
 
+	if Debug {
+		bytes, err := xml.MarshalIndent(f, "", "    ")
+		if err == nil {
+			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
+		}
+	}
+
 	// Send IQ message asking to bind to the local user name.
-	fmt.Fprintf(c.tls, "<iq type='set' id='x'><bind xmlns='%s'/></iq>\n", nsBind)
+	iqBindXml := fmt.Sprintf("<iq type='set' id='x'><bind xmlns='%s'/></iq>\n", nsBind)
+	if Debug {
+		fmt.Printf("===xmpp===send:\n%s\n", iqBindXml)
+	}
+	fmt.Fprint(c.tls, iqBindXml)
 	var iq IQ
 	if err = c.p.DecodeElement(&iq, nil); err != nil {
 		return errors.New("unmarshal <iq>: " + err.Error())
+	}
+	if Debug {
+		bytes, err := xml.MarshalIndent(iq, "", "    ")
+		if err == nil {
+			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
+		}
 	}
 	if &iq.Bind == nil {
 		return errors.New("<iq> result missing <bind>")
@@ -223,11 +267,9 @@ func (c *Client) Recv() (stanza interface{}, err error) {
 			return nil, err
 		}
 		if Debug {
-			bytes, err := xml.Marshal(stanza)
-			if err != nil {
-				fmt.Println("receive marshal error:", err)
-			} else {
-				fmt.Println("receive stanza:", string(bytes))
+			bytes, err := xml.MarshalIndent(stanza, "", "    ")
+			if err == nil {
+				fmt.Printf("===xmpp===receive:%s\n", string(bytes))
 			}
 		}
 		return stanza, nil
@@ -237,12 +279,12 @@ func (c *Client) Recv() (stanza interface{}, err error) {
 
 // Send sends message text.
 func (c *Client) Send(stanza interface{}) error {
-	bytes, err := xml.Marshal(stanza)
+	bytes, err := xml.MarshalIndent(stanza, "", "    ")
 	if err != nil {
 		return err
 	}
 	if Debug {
-		fmt.Println("send stanza:", string(bytes))
+		fmt.Printf("===xmpp===send:%s\n", string(bytes))
 	}
 	_, sendErr := c.tls.Write(bytes)
 	return sendErr
@@ -311,8 +353,8 @@ type saslFailure struct {
 
 type bindBind struct {
 	XMLName  xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-bind bind"`
-	Resource string
-	Jid      string `xml:"jid"`
+	Resource string   `xml:"resource,omitempty"`
+	Jid      string   `xml:"jid,omitempty"`
 }
 
 // RFC 3921  B.1  jabber:client
