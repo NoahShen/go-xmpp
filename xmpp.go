@@ -2,12 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// TODO(rsc):
-//	More precise error handling.
-//	Presence functionality.
-// TODO(mattn):
-//  Add proxy authentication.
-
 // Package xmpp implements a simple Google Talk client
 // using the XMPP protocol described in RFC 3920 and RFC 3921.
 package xmpp
@@ -15,12 +9,15 @@ package xmpp
 import (
 	"bufio"
 	"bytes"
+	"crypto/md5"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,19 +28,21 @@ import (
 var Debug = false
 
 const (
-	nsStream = "http://etherx.jabber.org/streams"
-	nsTLS    = "urn:ietf:params:xml:ns:xmpp-tls"
-	nsSASL   = "urn:ietf:params:xml:ns:xmpp-sasl"
-	nsBind   = "urn:ietf:params:xml:ns:xmpp-bind"
-	nsClient = "jabber:client"
+	nsStream  = "http://etherx.jabber.org/streams"
+	nsTLS     = "urn:ietf:params:xml:ns:xmpp-tls"
+	nsSASL    = "urn:ietf:params:xml:ns:xmpp-sasl"
+	nsBind    = "urn:ietf:params:xml:ns:xmpp-bind"
+	nsSession = "urn:ietf:params:xml:ns:xmpp-session"
+	nsClient  = "jabber:client"
 )
 
 var DefaultConfig tls.Config
 
 type Client struct {
-	tls *tls.Conn // connection to server
-	jid string    // Jabber ID for our connection
-	p   *xml.Decoder
+	conn   net.Conn // connection to server
+	jid    string   // Jabber ID for our connection
+	domain string
+	p      *xml.Decoder
 }
 
 // NewClient creates a new connection to a host given as "hostname" or "hostname:port".
@@ -76,9 +75,7 @@ func NewClient(host, user, passwd string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if Debug {
-		fmt.Printf("===xmpp===Connected host:%s\n", addr)
-	}
+
 	if proxy != "" {
 		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\n", host)
 		fmt.Fprintf(c, "Host: %s\r\n", host)
@@ -95,23 +92,12 @@ func NewClient(host, user, passwd string) (*Client, error) {
 		}
 	}
 
-	tlsconn := tls.Client(c, &DefaultConfig)
-	if err = tlsconn.Handshake(); err != nil {
-		return nil, err
-	}
 	if Debug {
-		fmt.Println("===xmpp===TLS shake hand success.")
-	}
-
-	if strings.LastIndex(host, ":") > 0 {
-		host = host[:strings.LastIndex(host, ":")]
-	}
-	if err = tlsconn.VerifyHostname(host); err != nil {
-		return nil, err
+		fmt.Printf("===xmpp===Connected host:%s\n", addr)
 	}
 
 	client := new(Client)
-	client.tls = tlsconn
+	client.conn = c
 	if err := client.init(user, passwd); err != nil {
 		client.Close()
 		return nil, err
@@ -120,76 +106,209 @@ func NewClient(host, user, passwd string) (*Client, error) {
 }
 
 func (c *Client) Close() error {
-	return c.tls.Close()
+	return c.conn.Close()
 }
 
 func (c *Client) init(user, passwd string) error {
-	// For debugging: the following causes the plaintext of the connection to be duplicated to stdout.
-	//c.p = xml.NewDecoder(tee{c.tls, os.Stdout})
-	c.p = xml.NewDecoder(c.tls)
+	c.p = xml.NewDecoder(c.conn)
 
 	a := strings.SplitN(user, "@", 2)
 	if len(a) != 2 {
 		return errors.New("xmpp: invalid username (want user@domain): " + user)
 	}
 	user = a[0]
-	domain := a[1]
+	c.domain = a[1]
 
-	// Declare intent to be a jabber client.
-	openStream := fmt.Sprintf("<?xml version='1.0'?><stream:stream to='%s' xmlns='%s' xmlns:stream='%s' version='1.0'>",
-		xmlEscape(domain), nsClient, nsStream)
+	features, streamErr := c.openStreamAndGetFeatures()
+	if streamErr != nil {
+		return streamErr
+	}
+
+	if features.StartTLS != nil {
+		if tlsErr := c.startTls(); tlsErr != nil {
+			return tlsErr
+		}
+		features, streamErr = c.openStreamAndGetFeatures()
+		if streamErr != nil {
+			return streamErr
+		}
+	}
+
+	if authErr := c.authenticate(features, user, passwd); authErr != nil {
+		return authErr
+	}
+
+	features, streamErr = c.openStreamAndGetFeatures()
+	if streamErr != nil {
+		return streamErr
+	}
+
+	if features.Bind != nil {
+		if bindResErr := c.bindResource(); bindResErr != nil {
+			return bindResErr
+		}
+	}
+	if features.Session != nil {
+		if bindSessionErr := c.bindSession(); bindSessionErr != nil {
+			return bindSessionErr
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) bindSession() error {
+	// Send IQ message asking to bind to the local user name.
+	iqBindSession := fmt.Sprintf("<iq type='set' id='x'><session xmlns='%s'/></iq>\n", nsSession)
 	if Debug {
-		fmt.Printf("===xmpp===send:\n%s\n", openStream)
+		fmt.Printf("===xmpp===send:\n%s\n", iqBindSession)
 	}
-	fmt.Fprint(c.tls, openStream)
-
-	// Server should respond with a stream opening.
-	se, err := nextStart(c.p)
-	if err != nil {
-		return err
-	}
-
-	if se.Name.Space != nsStream || se.Name.Local != "stream" {
-		return errors.New("xmpp: expected <stream> but got <" + se.Name.Local + "> in " + se.Name.Space)
-	}
-
-	// Now we're in the stream and can use Unmarshal.
-	// Next message should be <features> to tell us authentication options.
-	// See section 4.6 in RFC 3920.
-	var f streamFeatures
-	if err = c.p.DecodeElement(&f, nil); err != nil {
-		return errors.New("unmarshal <features>: " + err.Error())
+	fmt.Fprint(c.conn, iqBindSession)
+	var iq IQ
+	if err := c.p.DecodeElement(&iq, nil); err != nil {
+		return errors.New("unmarshal <iq>: " + err.Error())
 	}
 	if Debug {
-		bytes, err := xml.MarshalIndent(f, "", "    ")
+		bytes, err := xml.MarshalIndent(iq, "", "    ")
 		if err == nil {
 			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
 		}
 	}
+	if iq.Type != "result" {
+		return errors.New("bind session error!")
+	}
+	return nil
+}
+
+func (c *Client) bindResource() error {
+	// Send IQ message asking to bind to the local user name.
+	iqBindXml := fmt.Sprintf("<iq type='set' id='x'><bind xmlns='%s'/></iq>\n", nsBind)
+	if Debug {
+		fmt.Printf("===xmpp===send:\n%s\n", iqBindXml)
+	}
+	fmt.Fprint(c.conn, iqBindXml)
+	var iq IQ
+	if err := c.p.DecodeElement(&iq, nil); err != nil {
+		return errors.New("unmarshal <iq>: " + err.Error())
+	}
+	if Debug {
+		bytes, err := xml.MarshalIndent(iq, "", "    ")
+		if err == nil {
+			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
+		}
+	}
+	if &iq.Bind == nil {
+		return errors.New("<iq> result missing <bind>")
+	}
+	c.jid = iq.Bind.Jid // our local id
+	return nil
+}
+
+func (c *Client) authenticate(features *streamFeatures, user, password string) error {
 	havePlain := false
-	for _, m := range f.Mechanisms.Mechanism {
-		if m == "PLAIN" {
+	authenticated := false
+	for _, m := range features.Mechanisms.Mechanism {
+		switch m {
+		case "PLAIN":
 			havePlain = true
+		case "DIGEST-MD5":
+			// Digest-MD5 authentication
+			md5Auth := fmt.Sprintf("<auth xmlns='%s' mechanism='DIGEST-MD5'/>\n", nsSASL)
+			fmt.Fprintf(c.conn, md5Auth)
+			if Debug {
+				fmt.Printf("===xmpp===send:\n%s\n", md5Auth)
+			}
+			var ch saslChallenge
+			if decodeErr := c.p.DecodeElement(&ch, nil); decodeErr != nil {
+				return errors.New("unmarshal <challenge>: " + decodeErr.Error())
+			}
+			if Debug {
+				challengeXml := fmt.Sprintf("<challenge xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>%s</challenge>", ch)
+				fmt.Printf("===xmpp===receive:%s\n", challengeXml)
+			}
+
+			b, err := base64.StdEncoding.DecodeString(string(ch))
+			if err != nil {
+				return err
+			}
+			tokens := map[string]string{}
+			for _, token := range strings.Split(string(b), ",") {
+				kv := strings.SplitN(strings.TrimSpace(token), "=", 2)
+				if len(kv) == 2 {
+					if kv[1][0] == '"' && kv[1][len(kv[1])-1] == '"' {
+						kv[1] = kv[1][1 : len(kv[1])-1]
+					}
+					tokens[kv[0]] = kv[1]
+				}
+			}
+			realm, _ := tokens["realm"]
+			nonce, _ := tokens["nonce"]
+			qop, _ := tokens["qop"]
+			charset, _ := tokens["charset"]
+			cnonceStr := cnonce()
+			digestUri := "xmpp/" + c.domain
+			nonceCount := fmt.Sprintf("%08x", 1)
+			digest := saslDigestResponse(user, realm, password, nonce, cnonceStr, "AUTHENTICATE", digestUri, nonceCount)
+			message := "username=\"" + user + "\"" +
+				", realm=\"" + realm + "\"" +
+				", nonce=\"" + nonce + "\"" +
+				", cnonce=\"" + cnonceStr + "\"" +
+				", nc=" + nonceCount +
+				", qop=" + qop +
+				", digest-uri=\"" + digestUri + "\"" +
+				", response=" + digest +
+				", charset=" + charset
+			authResp := fmt.Sprintf("<response xmlns='%s'>%s</response>\n", nsSASL, base64.StdEncoding.EncodeToString([]byte(message)))
+			fmt.Fprintf(c.conn, authResp)
+			if Debug {
+				fmt.Printf("===xmpp===send:\n%s\n", authResp)
+			}
+
+			//var saslResp saslResponse
+			//if err = c.p.DecodeElement(&saslResp, nil); err != nil {
+			//	return errors.New("unmarshal <challenge>: " + err.Error())
+			//}
+			//if Debug {
+			//	saslRespXml := fmt.Sprintf("<response xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>%s</response>", saslResp)
+			//	fmt.Printf("===xmpp===receive:\n%s\n", saslRespXml)
+			//}
+			//b, err = base64.StdEncoding.DecodeString(string(saslResp))
+			//if err != nil {
+			//	return err
+			//}
+
+			//authResp2 := fmt.Sprintf("<response xmlns='%s'/>\n", nsSASL)
+			//fmt.Fprintf(c.conn, authResp2)
+			//if Debug {
+			//	fmt.Printf("===xmpp===send:\n%s\n", authResp2)
+			//}
+			authenticated = true
 			break
 		}
 	}
-	if !havePlain {
-		return errors.New(fmt.Sprintf("PLAIN authentication is not an option: %v", f.Mechanisms.Mechanism))
-	}
 
-	// Plain authentication: send base64-encoded \x00 user \x00 password.
-	raw := "\x00" + user + "\x00" + passwd
-	enc := make([]byte, base64.StdEncoding.EncodedLen(len(raw)))
-	base64.StdEncoding.Encode(enc, []byte(raw))
+	if !authenticated {
+		if !havePlain {
+			return errors.New(fmt.Sprintf("PLAIN authentication is not an option: %v", features.Mechanisms.Mechanism))
+		}
 
-	authXml := fmt.Sprintf("<auth xmlns='%s' mechanism='PLAIN'>%s</auth>", nsSASL, enc)
-	if Debug {
-		fmt.Printf("===xmpp===send:\n%s\n", authXml)
+		// Plain authentication: send base64-encoded \x00 user \x00 password.
+		raw := "\x00" + user + "\x00" + password
+		enc := make([]byte, base64.StdEncoding.EncodedLen(len(raw)))
+		base64.StdEncoding.Encode(enc, []byte(raw))
+
+		authXml := fmt.Sprintf("<auth xmlns='%s' mechanism='PLAIN'>%s</auth>", nsSASL, enc)
+		fmt.Fprintf(c.conn, authXml)
+		if Debug {
+			fmt.Printf("===xmpp===send:\n%s\n", authXml)
+		}
 	}
-	fmt.Fprintf(c.tls, authXml)
 
 	// Next message should be either success or failure.
 	name, val, err := next(c.p)
+	if err != nil {
+		return err
+	}
 	if Debug {
 		bytes, err := xml.MarshalIndent(val, "", "    ")
 		if err == nil {
@@ -205,56 +324,95 @@ func (c *Client) init(user, passwd string) error {
 	default:
 		return errors.New("expected <success> or <failure>, got <" + name.Local + "> in " + name.Space)
 	}
+	return nil
+}
 
-	// Now that we're authenticated, we're supposed to start the stream over again.
-	// Declare intent to be a jabber client.
-	openStream2 := fmt.Sprintf("<stream:stream to='%s' xmlns='%s' xmlns:stream='%s' version='1.0'>",
-		xmlEscape(domain), nsClient, nsStream)
-	if Debug {
-		fmt.Printf("===xmpp===send:\n%s\n", openStream2)
+func saslDigestResponse(username, realm, passwd, nonce, cnonceStr, authenticate, digestUri, nonceCountStr string) string {
+	h := func(text string) []byte {
+		h := md5.New()
+		h.Write([]byte(text))
+		return h.Sum(nil)
 	}
-	fmt.Fprint(c.tls, openStream2)
+	hex := func(bytes []byte) string {
+		return fmt.Sprintf("%x", bytes)
+	}
+	kd := func(secret, data string) []byte {
+		return h(secret + ":" + data)
+	}
 
-	// Here comes another <stream> and <features>.
-	se, err = nextStart(c.p)
+	a1 := string(h(username+":"+realm+":"+passwd)) + ":" +
+		nonce + ":" + cnonceStr
+	a2 := authenticate + ":" + digestUri
+	response := hex(kd(hex(h(a1)), nonce+":"+
+		nonceCountStr+":"+cnonceStr+":auth:"+
+		hex(h(a2))))
+	return response
+}
+
+func cnonce() string {
+	randSize := big.NewInt(0)
+	randSize.Lsh(big.NewInt(1), 64)
+	cn, err := rand.Int(rand.Reader, randSize)
 	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%016x", cn)
+}
+
+func (c *Client) openStreamAndGetFeatures() (*streamFeatures, error) {
+	// Declare intent to be a xmpp client.
+	openStream := fmt.Sprintf("<?xml version='1.0'?><stream:stream to='%s' xmlns='%s' xmlns:stream='%s' version='1.0'>",
+		xmlEscape(c.domain), nsClient, nsStream)
+	if Debug {
+		fmt.Printf("===xmpp===send:\n%s\n", openStream)
+	}
+	fmt.Fprint(c.conn, openStream)
+
+	// Server should respond with a stream opening.
+	se, err := nextStart(c.p)
+	if err != nil {
+		return nil, err
+	}
+
+	if se.Name.Space != nsStream || se.Name.Local != "stream" {
+		return nil, errors.New("xmpp: expected <stream> but got <" + se.Name.Local + "> in " + se.Name.Space)
+	}
+
+	features := &streamFeatures{}
+	if err = c.p.DecodeElement(features, nil); err != nil {
+		return nil, errors.New("unmarshal <features>: " + err.Error())
+	}
+	if Debug {
+		bytes, err := xml.MarshalIndent(features, "", "    ")
+		if err == nil {
+			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
+		}
+	}
+	return features, nil
+}
+
+func (c *Client) startTls() error {
+	fmt.Fprintf(c.conn, "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+	var proceed tlsProceed
+	if err := c.p.DecodeElement(&proceed, nil); err != nil {
 		return err
 	}
-	if se.Name.Space != nsStream || se.Name.Local != "stream" {
-		return errors.New("expected <stream>, got <" + se.Name.Local + "> in " + se.Name.Space)
-	}
-	if err = c.p.DecodeElement(&f, nil); err != nil {
-		// TODO: often stream stop.
-		//return os.NewError("unmarshal <features>: " + err.String())
-	}
 
+	tlsconn := tls.Client(c.conn, &DefaultConfig)
+	if err := tlsconn.Handshake(); err != nil {
+		return err
+	}
+	c.conn = tlsconn
 	if Debug {
-		bytes, err := xml.MarshalIndent(f, "", "    ")
-		if err == nil {
-			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
-		}
+		fmt.Println("===xmpp===TLS shake hand success.")
 	}
-
-	// Send IQ message asking to bind to the local user name.
-	iqBindXml := fmt.Sprintf("<iq type='set' id='x'><bind xmlns='%s'/></iq>\n", nsBind)
-	if Debug {
-		fmt.Printf("===xmpp===send:\n%s\n", iqBindXml)
-	}
-	fmt.Fprint(c.tls, iqBindXml)
-	var iq IQ
-	if err = c.p.DecodeElement(&iq, nil); err != nil {
-		return errors.New("unmarshal <iq>: " + err.Error())
-	}
-	if Debug {
-		bytes, err := xml.MarshalIndent(iq, "", "    ")
-		if err == nil {
-			fmt.Printf("===xmpp===receive:%s\n", string(bytes))
-		}
-	}
-	if &iq.Bind == nil {
-		return errors.New("<iq> result missing <bind>")
-	}
-	c.jid = iq.Bind.Jid // our local id
+	c.p = xml.NewDecoder(c.conn)
+	//if strings.LastIndex(host, ":") > 0 {
+	//	host = host[:strings.LastIndex(host, ":")]
+	//}
+	//if err = tlsconn.VerifyHostname(host); err != nil {
+	//	return nil, err
+	//}
 
 	return nil
 }
@@ -286,17 +444,17 @@ func (c *Client) Send(stanza interface{}) error {
 	if Debug {
 		fmt.Printf("===xmpp===send:%s\n", string(bytes))
 	}
-	_, sendErr := c.tls.Write(bytes)
+	_, sendErr := c.conn.Write(bytes)
 	return sendErr
 }
 
 // RFC 3920  C.1  Streams name space
 type streamFeatures struct {
 	XMLName    xml.Name `xml:"http://etherx.jabber.org/streams features"`
-	StartTLS   tlsStartTLS
+	StartTLS   *tlsStartTLS
 	Mechanisms saslMechanisms
-	Bind       bindBind
-	Session    bool
+	Bind       *bindBind
+	Session    *bindSession
 }
 
 type streamError struct {
@@ -308,7 +466,7 @@ type streamError struct {
 // RFC 3920  C.3  TLS name space
 
 type tlsStartTLS struct {
-	XMLName  xml.Name `xml:":ietf:params:xml:ns:xmpp-tls starttls"`
+	XMLName  xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-tls starttls"`
 	Required bool
 }
 
@@ -355,6 +513,10 @@ type bindBind struct {
 	XMLName  xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-bind bind"`
 	Resource string   `xml:"resource,omitempty"`
 	Jid      string   `xml:"jid,omitempty"`
+}
+
+type bindSession struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-session session"`
 }
 
 // RFC 3921  B.1  jabber:client
