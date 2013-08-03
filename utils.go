@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math/rand"
+	"net"
 	"strings"
 	"time"
 )
@@ -45,4 +46,16 @@ func RandomString(l int) string {
 func randChar() string {
 	rand.Seed(time.Now().UTC().UnixNano())
 	return string(alpha[rand.Intn(len(alpha)-1)])
+}
+
+func ResolveXMPPDomain(domain string) (string, uint16, error) {
+	service := "xmpp-client"
+	proto := "tcp"
+	_, addrs, _ := net.LookupSRV(service, proto, domain)
+
+	if len(addrs) > 0 {
+		addr := addrs[0]
+		return addr.Target, addr.Port, nil
+	}
+	return domain, 5222, nil
 }

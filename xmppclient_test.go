@@ -6,14 +6,13 @@ import (
 	"time"
 )
 
-var server = "talk.google.com:443"
-var username = "username@gmail.com"
+var username = "username@jabber.org"
 var password = "password"
 
 func TestSendMessage(t *testing.T) {
 	Debug = true
 	xmppClient := NewXmppClient(ClientConfig{true, 1, 10 * time.Second, true, 5})
-	err := xmppClient.Connect(server, username, password)
+	err := xmppClient.Connect("", username, password)
 	if err != nil {
 		t.Fatal(err)
 	}

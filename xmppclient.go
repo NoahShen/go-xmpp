@@ -3,6 +3,7 @@ package xmpp
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +56,21 @@ func (self *XmppClient) Connect(host, jid, password string) error {
 	}
 
 	self.stopPingCh = make(chan int, 1)
+
+	if strings.TrimSpace(host) == "" {
+		domain, err := GetDomain(jid)
+		if err != nil {
+			return err
+		}
+		h, p, resolveErr := ResolveXMPPDomain(domain)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		host = fmt.Sprintf("%s:%d", h, p)
+		if Debug {
+			fmt.Printf("resolve xmpp domain: %s", host)
+		}
+	}
 
 	client, err := NewClient(host, jid, password)
 	if err != nil {
