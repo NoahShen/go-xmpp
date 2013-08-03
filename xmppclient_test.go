@@ -6,10 +6,8 @@ import (
 	"time"
 )
 
-//var username = "NoahPi87@gmail.com"
-//var password = "15935787"
-var username = "NoahShen@jabber.org"
-var password = "159357"
+var username = "username@jabber.org"
+var password = "password"
 
 func TestSendMessage(t *testing.T) {
 	Debug = true
